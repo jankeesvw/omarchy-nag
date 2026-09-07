@@ -6,6 +6,8 @@ It exists because an alarm for quarter past three today is not an appointment. P
 
 Named after and inspired by [Pester](https://sabi.net/nriley/software/) by Nicholas Riley, which has done this on the Mac since 2002.
 
+![Nag in the Omarchy bar](preview.png)
+
 ## What you can type
 
 The field takes the time and the message together, and works out where one ends and the other begins.

@@ -410,6 +410,15 @@ Panel {
   onOpenedChanged: {
     if (!opened) return
     refresh()
+
+    // Open on an empty field. A half-typed alarm you walked away from is not
+    // something to hand back later: these are disposable, and the draft is the
+    // most disposable part of them.
+    draft = ""
+    preview = null
+    actionError = ""
+    cursor = -1
+
     // A new example every time the panel opens, rather than on a timer. Over a
     // week you see all of them, and the line never moves while you are reading
     // it, which is what a rotating placeholder does wrong.
