@@ -1,0 +1,672 @@
+#!/bin/bash
+#
+# nag - disposable alarms for the Omarchy bar.
+#
+# One text field takes both the time and the message: "15:15 pick up the kids",
+# "5m tea", "tomorrow 9:00 dentist". This script owns all of the parsing, so the
+# panel never has to know what a valid time looks like and there is exactly one
+# place to fix when it gets something wrong.
+#
+# Alarms are systemd user timers set with --on-calendar, which means they are
+# anchored to wall-clock time and survive a shell restart, a Quickshell crash
+# and a suspend. That last one is the reason for --on-calendar over the
+# --on-active that the built-in `omarchy reminder` uses: OnActiveSec counts
+# monotonic seconds, which stop while the machine sleeps, so an alarm set for
+# 15:15 fires late by however long the lid was shut.
+#
+# Every alarm is also written to disk, and `list` puts back any timer that has
+# gone missing while its time is still ahead. That covers a reboot, which
+# transient systemd units do not survive on their own.
+
+set -euo pipefail
+
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nag"
+readonly ALARM_DIR="$STATE_DIR/alarms"
+readonly RING_DIR="$STATE_DIR/ringing"
+
+# Bounds. The panel is one text field on a shared, long-lived shell process, so
+# everything that comes out of it is capped at the producer rather than trusted
+# to be reasonable.
+readonly MAX_ALARMS=64
+readonly MAX_MESSAGE=200
+readonly MAX_SPEC=200
+readonly MAX_SNOOZE_MINUTES=1440
+
+readonly SOUND="/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
+readonly GLYPH=$''  # nf-fa-bell
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+die() {
+  jq -cn --arg error "$1" '{ok: false, error: $error}'
+  exit 0
+}
+
+ok_json() { jq -cn "$@"; }
+
+# One alarm document is a handful of fields, so anything approaching this is
+# either corruption or somebody else's file.
+readonly MAX_STATE_BYTES=4096
+
+# Any process running as this user can plant a symlink or a FIFO on a path it
+# can predict, and every path here is predictable. So a directory that is not a
+# real directory we own is refused rather than repaired, and the mode is put
+# back on every run: a directory that is 0700 today can still hold 0644 files
+# from an earlier version, or entries nobody here created.
+harden_dir() {
+  local dir="$1"
+
+  if [[ -L $dir ]]; then
+    echo "nag: $dir is a symlink, refusing" >&2
+    return 1
+  fi
+
+  mkdir -p -m 700 -- "$dir" 2>/dev/null || true
+
+  [[ -d $dir && ! -L $dir ]] || { echo "nag: $dir is not a directory" >&2; return 1; }
+  [[ -O $dir ]] || { echo "nag: $dir is not ours" >&2; return 1; }
+
+  chmod 700 -- "$dir" 2>/dev/null || true
+}
+
+# The two leaf directories hold nothing but alarm documents, so anything in
+# there that is not a regular file was not put there by this plugin and goes.
+# find uses lstat, which is what makes a planted symlink -type l rather than
+# whatever it points at. This runs unconditionally: a directory that is 0700
+# today can still hold 0644 files written by an earlier version.
+clean_leaf_dir() {
+  local dir="$1"
+  find "$dir" -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf -- {} + 2>/dev/null || true
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null || true
+}
+
+ensure_dirs() {
+  # The parent is only checked and re-moded, never swept: its entries are the
+  # two directories below it.
+  harden_dir "$STATE_DIR" || exit 1
+  harden_dir "$ALARM_DIR" || exit 1
+  harden_dir "$RING_DIR" || exit 1
+  clean_leaf_dir "$ALARM_DIR"
+  clean_leaf_dir "$RING_DIR"
+}
+
+# Read a state file through one descriptor that refuses to follow a symlink and
+# refuses to block on a FIFO, capped at one byte over the limit so an oversized
+# file is detected rather than silently truncated into something that still
+# parses. `cat` and `jq file` would do neither.
+read_state() {
+  local file="$1" out
+  out=$(dd if="$file" iflag=nofollow,nonblock,count_bytes,fullblock \
+        bs=4096 count=$((MAX_STATE_BYTES + 1)) status=none 2>/dev/null) || return 1
+  ((${#out} <= MAX_STATE_BYTES)) || return 1
+  [[ -n $out ]] || return 1
+  printf '%s' "$out"
+}
+
+# Publish through an exclusive temporary in the destination directory, created
+# 0600 by the umask, then renamed. rename(2) replaces a symlink sitting at the
+# destination instead of writing through it, which a plain `>` would do.
+write_state() {
+  local dest="$1" payload="$2" dir tmp
+  dir=$(dirname -- "$dest")
+
+  tmp=$(umask 077; mktemp -p "$dir" .nag.XXXXXXXXXX) || return 1
+  printf '%s\n' "$payload" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -T -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+}
+
+# Strip what a markup-capable sink would act on, plus control characters, and
+# cap the length. Notification summaries and bodies are rendered by components
+# this plugin cannot pin to plain text, and the message is whatever somebody
+# typed.
+strip_markup() {
+  local text="$1"
+  text=${text//[<>&]/ }
+  # A message reaches omarchy-notification-send as a positional, and that
+  # parser reads a leading dash as an option: a message of "-u" is taken as the
+  # urgency flag and the notification never appears. Nothing is quoted away
+  # here, the dashes are simply not part of what somebody meant to say.
+  while [[ $text == -* ]]; do text=${text#-}; done
+  clean_text "$text" "$MAX_MESSAGE"
+}
+
+# Tell the bar widget to re-read the list now, rather than leaving it to show a
+# stale countdown until its next poll. Silent and best-effort: the shell may not
+# be running, and this is a nicety, not a step the command depends on.
+refresh_panel() {
+  omarchy-shell -q jankeesvw.nag refresh >/dev/null 2>&1 || true
+}
+
+# Alarm ids are generated here and never come from anywhere else, but they
+# arrive back as arguments to cancel/snooze/fire, so they are checked on the way
+# in: an id becomes a systemd unit name and a file path.
+valid_id() {
+  [[ $1 =~ ^[0-9]{10,}-[0-9]{1,6}$ ]]
+}
+
+new_id() {
+  printf '%s-%s' "$(date +%s)" "$RANDOM"
+}
+
+# Trim, collapse whitespace, drop control characters, and cap the length. The
+# result reaches a notification headline and a Text element, so newlines and
+# escapes have no business surviving.
+clean_text() {
+  local text="$1" limit="$2"
+  text=$(printf '%s' "$text" | tr -d '\000-\037\177' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//')
+  printf '%s' "${text:0:$limit}"
+}
+
+format_remaining() {
+  local seconds=$1
+  ((seconds < 0)) && seconds=0
+
+  local days=$((seconds / 86400))
+  local hours=$(((seconds % 86400) / 3600))
+  local minutes=$(((seconds % 3600) / 60))
+  local secs=$((seconds % 60))
+
+  if ((days > 0)); then
+    printf '%dd %dh' "$days" "$hours"
+  elif ((hours > 0)); then
+    printf '%dh %02dm' "$hours" "$minutes"
+  elif ((minutes > 0)); then
+    printf '%dm' "$minutes"
+  else
+    printf '%ds' "$secs"
+  fi
+}
+
+# "15:15" for something later today, "tomorrow 09:00", "Wed 18:15" within the
+# week, and a date beyond that.
+format_at() {
+  local at=$1
+  local today tomorrow day
+  today=$(date +%Y%m%d)
+  tomorrow=$(date -d "tomorrow" +%Y%m%d)
+  day=$(date -d "@$at" +%Y%m%d)
+
+  if [[ $day == "$today" ]]; then
+    date -d "@$at" '+%H:%M'
+  elif [[ $day == "$tomorrow" ]]; then
+    date -d "@$at" '+tomorrow %H:%M'
+  elif ((at - $(date +%s) < 604800)); then
+    date -d "@$at" '+%a %H:%M'
+  else
+    date -d "@$at" '+%-d %b %H:%M'
+  fi
+}
+
+# The same moment as a sentence rather than as a label, for the tooltip: "Tea at
+# 11:25", "Dentist tomorrow at 09:00". The "at" has to move around the day word
+# instead of sitting in front of it, which is why this is here and not a string
+# concatenation at the other end.
+format_at_phrase() {
+  local at=$1
+  local today tomorrow day
+  today=$(date +%Y%m%d)
+  tomorrow=$(date -d "tomorrow" +%Y%m%d)
+  day=$(date -d "@$at" +%Y%m%d)
+
+  if [[ $day == "$today" ]]; then
+    date -d "@$at" '+at %H:%M'
+  elif [[ $day == "$tomorrow" ]]; then
+    date -d "@$at" '+tomorrow at %H:%M'
+  elif ((at - $(date +%s) < 604800)); then
+    date -d "@$at" '+%A at %H:%M'
+  else
+    date -d "@$at" '+on %-d %B at %H:%M'
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# time parsing
+# ---------------------------------------------------------------------------
+
+# Durations from now: 5, 5m, 90s, 2h, 1h30, 1h30m, 2d, 1w, and the spelled-out
+# forms. A bare number is minutes, which is what the built-in reminder takes.
+# Prints seconds, or fails.
+parse_duration() {
+  local rest
+  rest=$(printf '%s' "${1,,}" | tr -d ' ')
+  [[ -z $rest ]] && return 1
+
+  local total=0 num unit
+  while [[ -n $rest ]]; do
+    [[ $rest =~ ^([0-9]+)(seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|uur|u|days|day|d|weeks|week|w)?(.*)$ ]] || return 1
+    num=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    rest=${BASH_REMATCH[3]}
+
+    # Guard the multiplication rather than the input: a 12-digit number of
+    # weeks would otherwise overflow into a negative timestamp.
+    ((${#num} > 7)) && return 1
+
+    case $unit in
+      s | sec | secs | second | seconds) total=$((total + num)) ;;
+      h | hr | hrs | hour | hours | u | uur) total=$((total + num * 3600)) ;;
+      d | day | days) total=$((total + num * 86400)) ;;
+      w | week | weeks) total=$((total + num * 604800)) ;;
+      # No unit means minutes, so both "5" and the 30 in "1h30" land here.
+      *) total=$((total + num * 60)) ;;
+    esac
+  done
+
+  ((total > 0)) || return 1
+  printf '%d' "$total"
+}
+
+# Resolve one candidate time spec to an absolute epoch, or fail. Duration first,
+# because `date -d` reads "5" as a year and "1h30" as nothing at all.
+resolve_spec() {
+  local spec="$1"
+  local now seconds at
+
+  now=$(date +%s)
+
+  if seconds=$(parse_duration "$spec"); then
+    printf '%d' $((now + seconds))
+    return 0
+  fi
+
+  # GNU date handles the absolute half: "15:15", "9pm", "tomorrow 9:00",
+  # "wed 18:15", "next monday 8:00", "dec 25 9:00". It parses text, it does not
+  # evaluate it, so an untrusted spec here is a string and nothing more.
+  at=$(date -d "$spec" +%s 2>/dev/null) || return 1
+  [[ $at =~ ^-?[0-9]+$ ]] || return 1
+
+  # A clock time that has already gone today means the next one, tomorrow. Only
+  # when the spec landed on today: "yesterday 9:00" is a mistake, not a wish.
+  if ((at <= now)); then
+    if [[ $(date -d "@$at" +%Y%m%d) == "$(date +%Y%m%d)" ]]; then
+      at=$((at + 86400))
+    else
+      return 1
+    fi
+  fi
+
+  printf '%d' "$at"
+}
+
+# Split "15:15 pick up the kids" into a time and a message by trying the longest
+# leading run of words that resolves, down to one. Longest first is what lets
+# "tomorrow 9:00 dentist" and "next wednesday 18:15 hockey" work without the
+# message having to be quoted.
+#
+# Sets PARSED_AT and PARSED_MESSAGE.
+parse_input() {
+  local input
+  input=$(clean_text "$*" "$MAX_SPEC")
+  [[ -z $input ]] && return 1
+
+  local -a words
+  read -r -a words <<<"$input"
+  local count=${#words[@]}
+  ((count == 0)) && return 1
+
+  local max=$((count < 4 ? count : 4))
+  local n spec at
+  for ((n = max; n >= 1; n--)); do
+    spec="${words[*]:0:n}"
+    if at=$(resolve_spec "$spec"); then
+      PARSED_AT=$at
+      PARSED_MESSAGE=$(clean_text "${words[*]:n}" "$MAX_MESSAGE")
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# alarm state
+# ---------------------------------------------------------------------------
+
+write_alarm() {
+  local id=$1 at=$2 message=$3
+  local payload
+  payload=$(jq -cn --arg id "$id" --argjson at "$at" --arg message "$message" \
+    --argjson created "$(date +%s)" \
+    '{id: $id, at: $at, message: $message, created: $created}')
+  write_state "$ALARM_DIR/$id.json" "$payload"
+}
+
+# Arm the systemd timer for an alarm that is already on disk.
+arm_timer() {
+  local id=$1 at=$2
+  local when
+  when=$(date -d "@$at" '+%Y-%m-%d %H:%M:%S')
+
+  systemd-run --user --quiet --collect \
+    --unit="nag-$id" \
+    --on-calendar="$when" \
+    --timer-property=AccuracySec=1s \
+    -- "$SELF" fire "$id" >/dev/null 2>&1
+}
+
+timer_exists() {
+  systemctl --user list-units --all --no-legend --plain "nag-$1.timer" 2>/dev/null | grep -q .
+}
+
+# Read every alarm on disk, drop the ones whose time has passed without firing,
+# and re-arm any whose timer is missing. A reboot clears transient units but not
+# the files, so this is what makes an alarm for tomorrow morning real.
+load_alarms() {
+  local now file id at message
+  now=$(date +%s)
+  LOADED=()
+
+  shopt -s nullglob
+  for file in "$ALARM_DIR"/*.json; do
+    # A file we cannot read as one bounded, regular, well-shaped document is
+    # dropped rather than repaired. Losing an alarm is the honest outcome for
+    # state that is no longer ours to trust.
+    local raw
+    if ! raw=$(read_state "$file"); then
+      rm -f -- "$file"
+      continue
+    fi
+    if ! jq -e 'type == "object" and has("at") and has("id")' >/dev/null 2>&1 <<<"$raw"; then
+      rm -f -- "$file"
+      continue
+    fi
+
+    id=$(jq -r '.id' <<<"$raw")
+    at=$(jq -r '.at' <<<"$raw")
+    message=$(jq -r '.message // ""' <<<"$raw")
+
+    if ! valid_id "$id" || [[ ! $at =~ ^[0-9]+$ ]]; then
+      rm -f -- "$file"
+      continue
+    fi
+
+    # Past its time and not ringing: it fired while we were not running, or the
+    # timer was lost. Either way there is nothing left to wait for.
+    if ((at <= now)); then
+      [[ -f "$RING_DIR/$id.json" ]] || rm -f -- "$file"
+      continue
+    fi
+
+    timer_exists "$id" || arm_timer "$id" "$at"
+    LOADED+=("$id"$'\t'"$at"$'\t'"$message")
+  done
+  shopt -u nullglob
+}
+
+cancel_alarm() {
+  local id=$1
+  systemctl --user stop "nag-$id.timer" >/dev/null 2>&1 || true
+  systemctl --user stop "nag-$id.service" >/dev/null 2>&1 || true
+  rm -f -- "$ALARM_DIR/$id.json" "$RING_DIR/$id.json"
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+cmd_parse() {
+  local PARSED_AT PARSED_MESSAGE
+  if ! parse_input "$@"; then
+    ok_json '{ok: false, error: "not a time"}'
+    return
+  fi
+
+  ok_json \
+    --argjson at "$PARSED_AT" \
+    --arg atLabel "$(format_at "$PARSED_AT")" \
+    --arg atPhrase "$(format_at_phrase "$PARSED_AT")" \
+    --arg remaining "$(format_remaining $((PARSED_AT - $(date +%s))))" \
+    --arg message "$PARSED_MESSAGE" \
+    '{ok: true, at: $at, atLabel: $atLabel, atPhrase: $atPhrase, remaining: $remaining, message: $message}'
+}
+
+cmd_set() {
+  ensure_dirs
+
+  local count
+  count=$(find "$ALARM_DIR" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+  ((count >= MAX_ALARMS)) && die "too many alarms"
+
+  local PARSED_AT PARSED_MESSAGE
+  parse_input "$@" || die "not a time"
+
+  local id
+  id=$(new_id)
+  write_alarm "$id" "$PARSED_AT" "$PARSED_MESSAGE"
+
+  if ! arm_timer "$id" "$PARSED_AT"; then
+    rm -f -- "$ALARM_DIR/$id.json"
+    die "could not set the timer"
+  fi
+
+  refresh_panel
+  ok_json --arg id "$id" --argjson at "$PARSED_AT" \
+    --arg atLabel "$(format_at "$PARSED_AT")" \
+    --arg atPhrase "$(format_at_phrase "$PARSED_AT")" \
+    --arg remaining "$(format_remaining $((PARSED_AT - $(date +%s))))" \
+    --arg message "$PARSED_MESSAGE" \
+    '{ok: true, id: $id, at: $at, atLabel: $atLabel, atPhrase: $atPhrase, remaining: $remaining, message: $message}'
+}
+
+cmd_list() {
+  ensure_dirs
+
+  local LOADED
+  load_alarms
+
+  local now entry id at message alarms='[]' item
+  now=$(date +%s)
+
+  for entry in "${LOADED[@]}"; do
+    IFS=$'\t' read -r id at message <<<"$entry"
+    item=$(jq -cn --arg id "$id" --argjson at "$at" --arg message "$message" \
+      --arg atLabel "$(format_at "$at")" \
+      --arg atPhrase "$(format_at_phrase "$at")" \
+      --arg remaining "$(format_remaining $((at - now)))" \
+      --argjson remainingSeconds $((at - now)) \
+      '{id: $id, at: $at, message: $message, atLabel: $atLabel, atPhrase: $atPhrase, remaining: $remaining, remainingSeconds: $remainingSeconds, ringing: false}')
+    alarms=$(jq -c --argjson item "$item" '. + [$item]' <<<"$alarms")
+  done
+
+  # Anything still ringing goes on the front: it is the only thing in the panel
+  # that is waiting on an answer.
+  local ringing='[]' file raw
+  shopt -s nullglob
+  for file in "$RING_DIR"/*.json; do
+    raw=$(read_state "$file") || { rm -f -- "$file"; continue; }
+    jq -e 'type == "object" and has("id")' >/dev/null 2>&1 <<<"$raw" || { rm -f -- "$file"; continue; }
+    item=$(jq -c '. + {ringing: true, remaining: "now", remainingSeconds: 0,
+                       atPhrase: ("at " + (.atLabel // ""))}' <<<"$raw")
+    ringing=$(jq -c --argjson item "$item" '. + [$item]' <<<"$ringing")
+  done
+  shopt -u nullglob
+
+  alarms=$(jq -c 'sort_by(.at)' <<<"$alarms")
+  alarms=$(jq -c --argjson ringing "$ringing" '$ringing + .' <<<"$alarms")
+
+  jq -cn --argjson alarms "$alarms" '
+    {
+      ok: true,
+      count: ($alarms | length),
+      ringingCount: ([$alarms[] | select(.ringing)] | length),
+      next: ([$alarms[] | select(.ringing | not)] | first),
+      alarms: $alarms
+    }'
+}
+
+cmd_cancel() {
+  ensure_dirs
+  local id=${1:-}
+  valid_id "$id" || die "unknown alarm"
+  cancel_alarm "$id"
+  refresh_panel
+  ok_json '{ok: true}'
+}
+
+cmd_clear() {
+  ensure_dirs
+  local file id
+  shopt -s nullglob
+  for file in "$ALARM_DIR"/*.json "$RING_DIR"/*.json; do
+    id=$(basename -- "$file" .json)
+    valid_id "$id" && cancel_alarm "$id"
+  done
+  shopt -u nullglob
+  refresh_panel
+  ok_json '{ok: true}'
+}
+
+cmd_snooze() {
+  ensure_dirs
+  local id=${1:-} minutes=${2:-5}
+
+  valid_id "$id" || die "unknown alarm"
+  [[ $minutes =~ ^[0-9]{1,4}$ ]] || die "bad snooze"
+  ((minutes >= 1 && minutes <= MAX_SNOOZE_MINUTES)) || die "bad snooze"
+
+  local message="" raw=""
+  raw=$(read_state "$RING_DIR/$id.json") || raw=$(read_state "$ALARM_DIR/$id.json") || die "unknown alarm"
+  message=$(jq -r '.message // ""' <<<"$raw" 2>/dev/null || true)
+
+  cancel_alarm "$id"
+
+  local new_alarm at
+  new_alarm=$(new_id)
+  at=$(($(date +%s) + minutes * 60))
+  write_alarm "$new_alarm" "$at" "$message"
+  arm_timer "$new_alarm" "$at" || { rm -f -- "$ALARM_DIR/$new_alarm.json"; die "could not set the timer"; }
+
+  refresh_panel
+  ok_json --arg id "$new_alarm" --argjson at "$at" \
+    --arg atLabel "$(format_at "$at")" \
+    '{ok: true, id: $id, at: $at, atLabel: $atLabel}'
+}
+
+# Ask for an alarm through the Omarchy menu overlay, which is the same text
+# prompt the rest of the system uses. Meant for a keybinding and for a row in
+# the menu: it puts setting an alarm one keystroke away from anywhere, without
+# the bar widget having to be open or even visible.
+#
+# Unlike the panel, this one confirms out loud. The overlay closes the moment
+# you press Enter, so a notification is the only thing that can tell you what
+# was understood.
+cmd_ask() {
+  command -v omarchy-menu-input >/dev/null 2>&1 || die "omarchy-menu-input is not available"
+
+  local text
+  # A cancelled prompt exits non-zero, and that is not an error worth reporting.
+  text=$(omarchy-menu-input "Nag" --width 420) || exit 0
+  text=$(clean_text "$text" "$MAX_SPEC")
+  [[ -z $text ]] && exit 0
+
+  local result
+  result=$(cmd_set "$text")
+
+  # The overlay closes the moment you press Enter, so this notification is the
+  # only chance to read back what was understood. It says the same sentence the
+  # panel puts under its field, for the same reason: it shows where the split
+  # between the time and the message landed.
+  if [[ $(jq -r '.ok' <<<"$result" 2>/dev/null) == "true" ]]; then
+    local message atPhrase remaining headline
+    message=$(jq -r '.message // ""' <<<"$result")
+    atPhrase=$(jq -r '.atPhrase // ""' <<<"$result")
+    remaining=$(jq -r '.remaining // ""' <<<"$result")
+
+    headline=$(strip_markup "$message")
+    headline=${headline:-Alarm}
+    headline=${headline^}
+
+    omarchy-notification-send -g "$GLYPH" "$headline $atPhrase" "in $remaining" \
+      >/dev/null 2>&1 || true
+  else
+    # Quote it back: seeing what you actually typed is what tells you which
+    # word it choked on.
+    omarchy-notification-send -g "$GLYPH" "No time in that" \
+      "$(strip_markup "$text")" >/dev/null 2>&1 || true
+  fi
+
+  printf '%s\n' "$result"
+}
+
+# Stop an alarm ringing without setting a new one.
+cmd_dismiss() {
+  ensure_dirs
+  local id=${1:-}
+  valid_id "$id" || die "unknown alarm"
+  cancel_alarm "$id"
+  refresh_panel
+  ok_json '{ok: true}'
+}
+
+# Run by the systemd timer. Moves the alarm to ringing, where it stays until it
+# is dismissed or snoozed from the panel: an alarm that clears itself after a
+# few seconds is one you can miss, and missing it is the whole thing this is
+# meant to prevent.
+cmd_fire() {
+  ensure_dirs
+  local id=${1:-}
+  valid_id "$id" || exit 0
+
+  local file="$ALARM_DIR/$id.json"
+  local raw
+  raw=$(read_state "$file") || exit 0
+
+  local message at
+  message=$(jq -r '.message // ""' <<<"$raw" 2>/dev/null || printf '')
+  at=$(jq -r '.at // 0' <<<"$raw" 2>/dev/null || printf '0')
+  [[ $at =~ ^[0-9]+$ ]] || at=$(date +%s)
+
+  local payload
+  payload=$(jq -cn --arg id "$id" --argjson at "$at" --arg message "$message" \
+    --arg atLabel "$(date -d "@$at" '+%H:%M')" \
+    '{id: $id, at: $at, message: $message, atLabel: $atLabel}')
+  write_state "$RING_DIR/$id.json" "$payload"
+  rm -f -- "$file"
+
+  [[ -r $SOUND ]] && (pw-play "$SOUND" >/dev/null 2>&1 &) || true
+
+  # The summary and body are rendered by components this plugin does not own,
+  # and the summary here is whatever somebody typed into the field.
+  local headline
+  headline=$(strip_markup "$message")
+  headline=${headline:-Alarm}
+  # --exec consumes the rest of the line and its words are run as argv without
+  # being re-parsed, so it comes last and the message never reaches it. Nothing
+  # from the message is in it: it is three constant words.
+  omarchy-notification-send -u critical -g "$GLYPH" \
+    "$headline" "$(date -d "@$at" '+%H:%M')" \
+    --exec omarchy-shell shell summon jankeesvw.nag >/dev/null 2>&1 || true
+
+  refresh_panel
+}
+
+usage() {
+  cat <<'EOF'
+Usage: nag set <time> [message]     15:15 pick up the kids | 5m tea | tomorrow 9:00 dentist
+       nag ask                      prompt for one through the Omarchy menu overlay
+       nag parse <time> [message]   resolve without setting, for the live preview
+       nag list                     every alarm as JSON
+       nag snooze <id> [minutes]    default 5
+       nag dismiss <id>
+       nag cancel <id>
+       nag clear
+EOF
+}
+
+readonly SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+
+case ${1:-list} in
+  set) shift; cmd_set "$@" ;;
+  ask | -i | --interactive) cmd_ask ;;
+  parse) shift; cmd_parse "$@" ;;
+  list) cmd_list ;;
+  snooze) shift; cmd_snooze "$@" ;;
+  dismiss) shift; cmd_dismiss "$@" ;;
+  cancel) shift; cmd_cancel "$@" ;;
+  clear) cmd_clear ;;
+  fire) shift; cmd_fire "$@" ;;
+  -h | --help | help) usage ;;
+  *) usage; exit 1 ;;
+esac

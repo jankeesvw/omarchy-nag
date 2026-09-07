@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "jankeesvw.nag",
+  "name": "Nag",
+  "version": "1.0.0",
+  "author": "Jankees van Woezik",
+  "description": "Disposable alarms from one text field: \"15:15 pick up the kids\", and the bar counts down to it.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Nag",
+    "description": "Disposable alarms from one text field: \"15:15 pick up the kids\", and the bar counts down to it.",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
