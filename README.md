@@ -89,12 +89,23 @@ Every alarm is written to disk as well, and the plugin re-arms any timer that ha
 
 There is no network access of any kind. Nothing is sent anywhere, and nothing is fetched.
 
+## Taking a screenshot of it
+
+`nag demo on` swaps the alarm list for three invented ones at fixed offsets from now, so a screenshot is reproducible and shows nothing of yours. While it is on, every write is a no-op: a click during a shoot cannot cancel a real alarm, and nothing fires. `nag demo off` puts your own alarms back and refreshes the bar at once, so the widget cannot be left showing invented data.
+
+```sh
+nag demo on
+nag demo status
+nag demo off
+```
+
 ## Files it writes
 
 Everything lives under `~/.local/state/nag`, created 0700, with each file 0600:
 
 - `alarms/<id>.json` for each pending alarm, holding its time and its message
 - `ringing/<id>.json` for an alarm that has gone off and is waiting to be answered
+- `demo`, an empty marker file, only while demo mode is on
 
 Your alarm messages are in those files, so treat them as you would any note to yourself.
 

@@ -23,6 +23,7 @@ set -euo pipefail
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nag"
 readonly ALARM_DIR="$STATE_DIR/alarms"
 readonly RING_DIR="$STATE_DIR/ringing"
+readonly DEMO_FILE="$STATE_DIR/demo"
 
 # Bounds. The panel is one text field on a shared, long-lived shell process, so
 # everything that comes out of it is capped at the producer rather than trusted
@@ -132,6 +133,41 @@ strip_markup() {
   # here, the dashes are simply not part of what somebody meant to say.
   while [[ $text == -* ]]; do text=${text#-}; done
   clean_text "$text" "$MAX_MESSAGE"
+}
+
+# Demo mode exists so a screenshot is reproducible and shows nothing of yours.
+# It is a separate set of alarms rather than a filter over the real ones, so
+# nothing that runs while it is on can touch a real alarm: every write below
+# returns without doing anything, and `list` answers from a fixed script.
+demo_on() { [[ -f $DEMO_FILE ]]; }
+
+# Fixed offsets from now rather than fixed clock times, so the countdowns are
+# always sensible and the same shot can be retaken in a year.
+demo_list() {
+  local now
+  now=$(date +%s)
+  local rows='[]' item at
+  add_demo() {
+    at=$((now + $1))
+    item=$(jq -cn --arg id "0000000000-$2" --argjson at "$at" --arg message "$3" \
+      --arg atLabel "$(format_at "$at")" \
+      --arg atPhrase "$(format_at_phrase "$at")" \
+      --arg remaining "$(format_remaining $1)" \
+      --argjson remainingSeconds "$1" \
+      '{id: $id, at: $at, message: $message, atLabel: $atLabel, atPhrase: $atPhrase,
+        remaining: $remaining, remainingSeconds: $remainingSeconds, ringing: false}')
+    rows=$(jq -c --argjson item "$item" '. + [$item]' <<<"$rows")
+  }
+  add_demo 18420 1 "pick up the kids"
+  add_demo 205200 2 "hockey practice"
+  add_demo 79200 3 "dentist"
+
+  # Sorted by time, exactly like the real list, so the demo cannot look
+  # different from what the plugin actually does.
+  jq -cn --argjson rows "$rows" '
+    ($rows | sort_by(.at)) as $alarms |
+    {ok: true, count: ($alarms | length), ringingCount: 0,
+     next: $alarms[0], alarms: $alarms}'
 }
 
 # Tell the bar widget to re-read the list now, rather than leaving it to show a
@@ -426,6 +462,9 @@ cmd_parse() {
 
 cmd_set() {
   ensure_dirs
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot tick away something real.
+  if demo_on; then ok_json '{ok: true, demo: true}'; return; fi
 
   local count
   count=$(find "$ALARM_DIR" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
@@ -454,6 +493,7 @@ cmd_set() {
 
 cmd_list() {
   ensure_dirs
+  if demo_on; then demo_list; return; fi
 
   local LOADED
   load_alarms
@@ -500,6 +540,9 @@ cmd_list() {
 
 cmd_cancel() {
   ensure_dirs
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot tick away something real.
+  if demo_on; then ok_json '{ok: true, demo: true}'; return; fi
   local id=${1:-}
   valid_id "$id" || die "unknown alarm"
   cancel_alarm "$id"
@@ -509,6 +552,9 @@ cmd_cancel() {
 
 cmd_clear() {
   ensure_dirs
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot tick away something real.
+  if demo_on; then ok_json '{ok: true, demo: true}'; return; fi
   local file id
   shopt -s nullglob
   for file in "$ALARM_DIR"/*.json "$RING_DIR"/*.json; do
@@ -522,6 +568,9 @@ cmd_clear() {
 
 cmd_snooze() {
   ensure_dirs
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot tick away something real.
+  if demo_on; then ok_json '{ok: true, demo: true}'; return; fi
   local id=${1:-} minutes=${2:-5}
 
   valid_id "$id" || die "unknown alarm"
@@ -610,6 +659,9 @@ cmd_ask() {
 # Stop an alarm ringing without setting a new one.
 cmd_dismiss() {
   ensure_dirs
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot tick away something real.
+  if demo_on; then ok_json '{ok: true, demo: true}'; return; fi
   local id=${1:-}
   valid_id "$id" || die "unknown alarm"
   cancel_alarm "$id"
@@ -623,6 +675,7 @@ cmd_dismiss() {
 # meant to prevent.
 cmd_fire() {
   ensure_dirs
+  demo_on && exit 0
   local id=${1:-}
   valid_id "$id" || exit 0
 
@@ -659,6 +712,30 @@ cmd_fire() {
   refresh_panel
 }
 
+# `demo on` and `demo off`, plus a bare `demo` that says which it is. Turning it
+# off refreshes the bar at once: a widget still showing invented alarms after
+# the shoot is exactly how a plugin gets left in demo mode.
+cmd_demo() {
+  ensure_dirs
+  case "${1:-status}" in
+    on)
+      : >"$DEMO_FILE"
+      chmod 600 "$DEMO_FILE" 2>/dev/null || true
+      refresh_panel
+      ok_json '{ok: true, demo: true}'
+      ;;
+    off)
+      rm -f -- "$DEMO_FILE"
+      refresh_panel
+      ok_json '{ok: true, demo: false}'
+      ;;
+    status | "")
+      if demo_on; then ok_json '{ok: true, demo: true}'; else ok_json '{ok: true, demo: false}'; fi
+      ;;
+    *) die "demo takes on, off or status" ;;
+  esac
+}
+
 usage() {
   cat <<'EOF'
 Usage: nag set <time> [message]     15:15 pick up the kids | 5m tea | tomorrow 9:00 dentist
@@ -669,6 +746,7 @@ Usage: nag set <time> [message]     15:15 pick up the kids | 5m tea | tomorrow 9
        nag dismiss <id>
        nag cancel <id>
        nag clear
+       nag demo on|off|status    invented alarms for screenshots
 EOF
 }
 
@@ -683,6 +761,7 @@ case ${1:-list} in
   dismiss) shift; cmd_dismiss "$@" ;;
   cancel) shift; cmd_cancel "$@" ;;
   clear) cmd_clear ;;
+  demo) shift; cmd_demo "$@" ;;
   fire) shift; cmd_fire "$@" ;;
   -h | --help | help) usage ;;
   *) usage; exit 1 ;;
