@@ -23,11 +23,25 @@ The field takes the time and the message together, and works out where one ends 
 | `wed 18:15 hockey` | the next Wednesday |
 | `next monday 8:00 standup` | as it says |
 | `2d water the plants` | two days from now |
-| `25 dec 9:00 call mum` | a date further out |
+| `dec 25 9:00 call mum` | a date further out |
+| `5분 차 마시기` | five minutes from now |
+| `다섯시삼십분 아이 데리러` | half past five |
+| `오후 다섯시 퇴근` | five in the afternoon |
+| `십오분 정리` | fifteen minutes from now |
+| `하루 뒤 복습` | a day from now |
+| `내일 9:00 치과` | tomorrow morning |
+| `수요일 18:15 하키` | the next Wednesday |
+| `12월 25일 9:00 엄마에게 전화` | a date further out |
 
 A bare number is minutes, so `5` is five minutes, which is what `omarchy reminder` takes too. Durations also accept the spelled-out units (`min`, `hour`, `days`) and `u` for uur.
 
 The line under the field shows what was understood before you commit to it, in the same words the bar will use afterwards. That is the point of it: `wed 18:15 hockey` reading back as "Hockey Wednesday at 18:15" tells you the Wednesday went into the time and not into the message.
+
+### Korean
+
+Korean works by translation, not by a second parser: `5분 차 마시기`, `90초`, `2시간 회의`, `1시간 30분 폴에게 전화`, `오후 3시 아이 데리러`, `3시 반 커피`, `내일 9:00 치과`, `모레 점심`, `수요일 18:15 하키`, `다음주 월요일 8:00 스탠드업`, `3일 물주기`, `12월 25일 9:00 엄마에게 전화`. Spaces between the time and the message are optional (`내일9시`), `후` and `뒤` are understood and dropped (`5분 후 알람`).
+
+Numerals work in Arabic and in hangul: `5분`, `다섯시`, `다섯시삼십분`, `다섯 시 반`, `오후 다섯시`, `두시간 반`, `반시간`, `십오분`, `이십오분`, `하루`, `이틀`, `사흘`. Weekdays need the full 요일 form, because bare `수` and `금` are ordinary words and guessing at them is how an alarm lands on the wrong day. Without `오전`/`오후`, an hour is the 24-hour clock, so `3시` and `다섯시` are three and five in the morning; the read-back line says which it took before you press Enter. The read-back itself speaks English regardless.
 
 ## Keys
 

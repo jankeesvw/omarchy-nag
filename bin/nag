@@ -263,6 +263,177 @@ format_at_phrase() {
 # time parsing
 # ---------------------------------------------------------------------------
 
+# Korean. Korean time words are mapped onto the English forms the two parsers
+# below already understand, so this is a translation pass and not a second
+# parser: one place learns Korean, both the duration path and the date path
+# keep working unchanged.
+#
+# It runs on a candidate time spec only and never on the message, so message
+# text passes through untouched — 퇴근 후 맥주 keeps its 후.
+#
+# Numerals work in Arabic and in hangul: 다섯시, 다섯시삼십분, 두시간, 십오분.
+# Weekdays need the full 요일
+# form, because the bare syllables (수, 금) are ordinary words and guessing at
+# them is how a plugin sets an alarm on the wrong day. Without 오전/오후, N시 is
+# the 24-hour clock: 3시 and 다섯시 are three and five in the morning, and the
+# preview line says so before Enter.
+
+# Value of a run of Korean number morphemes, native (하나, 열, 열두) and sino
+# (십, 이십, 삼십): 삼십 is 30, 십오 is 15, 이십오 is 25, 열두 is 12. A run that
+# mixes the two systems is not something anybody writes; it still produces a
+# number, which is all a spec needs before the unit decides what it means.
+hangul_num_value() {
+  local run="$1" m v
+  local -i total=0 pending=0
+  while [[ -n $run ]]; do
+    case $run in
+      열두*) m=2; v=12 ;;
+      열한*) m=2; v=11 ;;
+      오십*) m=2; v=50 ;;
+      사십*) m=2; v=40 ;;
+      삼십*) m=2; v=30 ;;
+      이십*) m=2; v=20 ;;
+      아홉*) m=2; v=9 ;;
+      여덟*) m=2; v=8 ;;
+      일곱*) m=2; v=7 ;;
+      여섯*) m=2; v=6 ;;
+      다섯*) m=2; v=5 ;;
+      하나*) m=2; v=1 ;;
+      십*) m=1; v=10 ;;
+      구*) m=1; v=9 ;;
+      팔*) m=1; v=8 ;;
+      칠*) m=1; v=7 ;;
+      육*) m=1; v=6 ;;
+      오*) m=1; v=5 ;;
+      사*) m=1; v=4 ;;
+      삼*) m=1; v=3 ;;
+      이*) m=1; v=2 ;;
+      일*) m=1; v=1 ;;
+      넷*) m=1; v=4 ;;
+      네*) m=1; v=4 ;;
+      셋*) m=1; v=3 ;;
+      세*) m=1; v=3 ;;
+      둘*) m=1; v=2 ;;
+      두*) m=1; v=2 ;;
+      한*) m=1; v=1 ;;
+      *) return 1 ;;
+    esac
+    run=${run:m}
+    if ((v == 10)); then
+      # 삼십 is three tens; bare 십 is one ten.
+      total=$((total + (pending == 0 ? 1 : pending) * 10))
+      pending=0
+    elif ((v > 10)); then
+      total=$((total + v))
+      pending=0
+    else
+      pending=$v
+    fi
+  done
+  printf '%d' $((total + pending))
+}
+translate_ko() {
+  local spec="$1"
+  local months=(jan feb mar apr may jun jul aug sep oct nov dec)
+  local idx
+
+  # 월-일 first, so the day number is not read as a duration in days.
+  if [[ $spec =~ ([0-9]+)[[:space:]]*월[[:space:]]*([0-9]+)[[:space:]]*일 ]]; then
+    idx=$((10#${BASH_REMATCH[1]}))
+    if ((idx >= 1 && idx <= 12)); then
+      spec=${spec/"${BASH_REMATCH[0]}"/"${months[idx - 1]} ${BASH_REMATCH[2]}"}
+    fi
+  fi
+  if [[ $spec =~ ([0-9]+)[[:space:]]*월 ]]; then
+    idx=$((10#${BASH_REMATCH[1]}))
+    if ((idx >= 1 && idx <= 12)); then
+      spec=${spec/"${BASH_REMATCH[0]}"/"${months[idx - 1]}"}
+    fi
+  fi
+
+  # Relative days, padded with spaces so 내일9시, typed without one, splits.
+  spec=${spec//다음주/" next "}
+  spec=${spec//다음 주/" next "}
+  spec=${spec//모레/" 2 days "}
+  spec=${spec//내일/" tomorrow "}
+
+  # Native day words, before the number run below: 하루 is not built from
+  # number morphemes, and in 사흘 the 사 is one but the 흘 is not a unit, so
+  # the generic pass would leave all of these alone.
+  spec=${spec//하루/1d}
+  spec=${spec//이틀/2d}
+  spec=${spec//사흘/3d}
+  spec=${spec//나흘/4d}
+  spec=${spec//열흘/10d}
+  spec=${spec//반시간/30분}
+
+  # Hangul numerals. A run of number morphemes directly in front of a unit is
+  # a quantity — 다섯시, 다섯시삼십분, 두시간, 십오분 — and gets its numerals
+  # swapped for digits. The unit is what keeps ordinary words out: 회의 has no
+  # morpheme run, 사흘 was already spent, and in 일시정지 the run 일 plus unit
+  # 시 converts but 정지 fails to parse, so the candidate falls through and the
+  # message is never touched.
+  #
+  # The run cannot come out of the parenthesised group: under +, a group keeps
+  # only its last repetition, so 이십오분 would report 오. The unit comes off
+  # the whole match instead, and the digits go back with the unit untouched —
+  # the digit rules below are the only rules that know what a 시 or a 분 does.
+  local numre='(열두|열한|아홉|여덟|일곱|다섯|여섯|하나|오십|사십|삼십|이십|십|둘|두|셋|세|넷|네|열|한|구|팔|칠|육|오|사|삼|이|일)+[[:space:]]*(시간|시|분|초|일|주)'
+  local whole unit value run
+  local -i guard=0
+  while [[ $spec =~ $numre ]] && ((guard += 1, guard <= 8)); do
+    whole=${BASH_REMATCH[0]}
+    unit=${BASH_REMATCH[2]}
+    run=${whole%"$unit"}
+    run=${run%"${run##*[![:space:]]}"}
+    value=$(hangul_num_value "$run") || break
+    spec=${spec/"$whole"/"${value}${unit}"}
+  done
+
+  # Durations and clock times. 시간 goes first: otherwise the 시 rule reads the
+  # 시 inside 3시간 and three hours becomes three o'clock.
+  spec=$(sed -E \
+    -e 's/([0-9]+)[[:space:]]*시간[[:space:]]*([0-9]+)[[:space:]]*분/\1h\2m/g' \
+    -e 's/([0-9]+)[[:space:]]*시간/\1h/g' \
+    -e 's/h[[:space:]]*반/h30m/g' \
+    -e 's/([0-9]+)[[:space:]]*시[[:space:]]*반/\1:30/g' \
+    -e 's/([0-9]+)[[:space:]]*시[[:space:]]*([0-9]+)[[:space:]]*분/\1:\2/g' \
+    -e 's/([0-9]+)[[:space:]]*시/\1:00/g' \
+    -e 's/([0-9]+)[[:space:]]*분/\1m/g' \
+    -e 's/([0-9]+)[[:space:]]*초/\1s/g' \
+    -e 's/([0-9]+)[[:space:]]*주/\1w/g' \
+    -e 's/([0-9]+)[[:space:]]*일/\1d/g' \
+    <<<"$spec")
+
+  # 오전/오후 sit before the number in Korean and after it in English.
+  if [[ $spec =~ (오전|오후)[[:space:]]*([0-9]+(:[0-9]+)?) ]]; then
+    spec=${spec/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"}
+  fi
+  spec=${spec//오전/ am}
+  spec=${spec//오후/ pm}
+
+  # Weekdays, full form.
+  spec=${spec//월요일/monday}
+  spec=${spec//화요일/tuesday}
+  spec=${spec//수요일/wednesday}
+  spec=${spec//목요일/thursday}
+  spec=${spec//금요일/friday}
+  spec=${spec//토요일/saturday}
+  spec=${spec//일요일/sunday}
+
+  # Where a translation left a weekday glued to a number (수요일18:15), split
+  # it. 후 and 뒤 carry no time of their own ("5분 후" is five minutes), so
+  # they go. No hangul ranges here: sed rejects a multibyte bracket range in a
+  # UTF-8 locale, and the padded replacements above already split the glued
+  # forms that matter.
+  spec=$(sed -E \
+    -e 's/(monday|tuesday|wednesday|thursday|friday|saturday|sunday)([0-9])/\1 \2/g' \
+    -e 's/(후|뒤)//g' \
+    <<<"$spec")
+
+  printf '%s' "$spec"
+}
+
 # Durations from now: 5, 5m, 90s, 2h, 1h30, 1h30m, 2d, 1w, and the spelled-out
 # forms. A bare number is minutes, which is what the built-in reminder takes.
 # Prints seconds, or fails.
@@ -274,7 +445,9 @@ parse_duration() {
   local total=0 num unit
   while [[ -n $rest ]]; do
     [[ $rest =~ ^([0-9]+)(seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|uur|u|days|day|d|weeks|week|w)?(.*)$ ]] || return 1
-    num=${BASH_REMATCH[1]}
+    # 10# because 08m is an octal that bash refuses, in Korean input just as
+    # much as in English.
+    num=$((10#${BASH_REMATCH[1]}))
     unit=${BASH_REMATCH[2]}
     rest=${BASH_REMATCH[3]}
 
@@ -299,7 +472,12 @@ parse_duration() {
 # Resolve one candidate time spec to an absolute epoch, or fail. Duration first,
 # because `date -d` reads "5" as a year and "1h30" as nothing at all.
 resolve_spec() {
-  local spec="$1"
+  local spec
+  spec=$(translate_ko "$1")
+  # An empty spec must stop here. GNU date reads an empty string as midnight
+  # today, which would otherwise turn a translation that came back empty into
+  # a confident alarm for tonight at twelve.
+  [[ -n $spec ]] || return 1
   local now seconds at
 
   now=$(date +%s)
@@ -695,8 +873,6 @@ cmd_fire() {
   write_state "$RING_DIR/$id.json" "$payload"
   rm -f -- "$file"
 
-  [[ -r $SOUND ]] && (pw-play "$SOUND" >/dev/null 2>&1 &) || true
-
   # The summary and body are rendered by components this plugin does not own,
   # and the summary here is whatever somebody typed into the field.
   local headline
@@ -710,6 +886,12 @@ cmd_fire() {
     --exec omarchy-shell shell summon jankeesvw.nag >/dev/null 2>&1 || true
 
   refresh_panel
+
+  # Foreground, and last: this runs inside a transient systemd unit whose
+  # cgroup is torn down the moment the main process exits, so the backgrounded
+  # pw-play this used to fork was killed mid-play and the alarm went off
+  # silently. Blocking here just means the unit lives as long as the sound.
+  [[ -r $SOUND ]] && pw-play "$SOUND" >/dev/null 2>&1 || true
 }
 
 # `demo on` and `demo off`, plus a bare `demo` that says which it is. Turning it
