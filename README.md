@@ -49,7 +49,9 @@ A critical notification, the freedesktop alarm sound, and the bar widget pulsing
 
 ## Setting one from anywhere
 
-`nag ask` opens the Omarchy menu's text prompt, so you can set an alarm without the bar widget being open or even visible. Add it to your menu by putting this in `~/.config/omarchy/extensions/omarchy-menu.jsonc`, with the path to where you installed the plugin:
+`nag ask` opens the panel wherever you are, so setting an alarm is one keystroke away from any workspace. It is the same panel with the same line reading back what it understood, because a second, simpler prompt somewhere else would be one that cannot tell you what it made of what you typed. If there is no Nag widget in your bar to open, it falls back to the Omarchy menu's text prompt and confirms with a notification instead.
+
+Add it to your menu by putting this in `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 
 ```jsonc
 "nag": {
@@ -66,7 +68,7 @@ Or bind it to a key in `~/.config/hypr/bindings.conf`:
 bindd = SUPER, N, Set an alarm, exec, $HOME/.config/omarchy/plugins/jankeesvw.nag/bin/nag ask
 ```
 
-The panel itself opens with `omarchy-shell shell toggle jankeesvw.nag`.
+The panel also opens with `omarchy-shell shell toggle jankeesvw.nag`, which closes it again on the same key.
 
 ## Install
 

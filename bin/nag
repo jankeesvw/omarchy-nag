@@ -555,6 +555,21 @@ cmd_snooze() {
 # you press Enter, so a notification is the only thing that can tell you what
 # was understood.
 cmd_ask() {
+  # The panel is the better prompt, because it reads back what it understood
+  # while you are still typing. The menu overlay cannot do that: it hands over
+  # one string when you press Enter and there is no way to say anything back
+  # before then. So the panel gets first refusal, and the overlay is only for
+  # the case where there is no live bar widget to open.
+  #
+  # summon always exits 0 and says "ok" or "unknown" on stdout, so the answer
+  # has to be read rather than the exit code.
+  local summoned
+  summoned=$(omarchy-shell shell summon jankeesvw.nag 2>/dev/null | head -c 32) || true
+  if [[ $summoned == ok* ]]; then
+    printf '{"ok":true,"opened":"panel"}\n'
+    return 0
+  fi
+
   command -v omarchy-menu-input >/dev/null 2>&1 || die "omarchy-menu-input is not available"
 
   local text
