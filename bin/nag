@@ -33,7 +33,9 @@ readonly MAX_SPEC=200
 readonly MAX_SNOOZE_MINUTES=1440
 
 readonly SOUND="/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
-readonly GLYPH=$''  # nf-fa-bell
+# nf-md-timer, the same glyph the bar widget wears, so a Nag notification is
+# recognisable as one at a glance instead of looking like every other toast.
+readonly GLYPH=$'󰔟'
 
 # ---------------------------------------------------------------------------
 # helpers
