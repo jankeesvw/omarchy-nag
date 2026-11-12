@@ -16,6 +16,15 @@
     "description": "Disposable alarms from one text field: \"15:15 pick up the kids\", and the bar counts down to it.",
     "category": "Time",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "hideWhenIdle",
+        "type": "boolean",
+        "label": "Hide when idle",
+        "description": "With no alarm set, show the widget only while the pointer is on the bar, like Omarchy's indicators.",
+        "defaultValue": false
+      }
+    ]
   }
 }

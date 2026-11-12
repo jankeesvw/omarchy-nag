@@ -199,8 +199,16 @@ Panel {
     + (barLabel !== "" ? Math.ceil(barMetrics.width) + Style.space(5) : 0)
     + Style.space(14)
 
-  implicitWidth: bar && bar.vertical ? (bar ? bar.barSize : Style.bar.sizeHorizontal) : barSlot
-  implicitHeight: bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
+  // With hideWhenIdle, a Nag with no alarm behaves like Omarchy's indicators:
+  // no slot until the pointer comes onto the bar, then a dimmed icon to click.
+  readonly property bool hideWhenIdle: setting("hideWhenIdle", false) === true
+  readonly property bool idle: alarms.length === 0 && !opened
+  readonly property bool barPeek: !!bar && bar.centerSectionRevealHeld === true && bar.centerHoverRevealSuppressed !== true
+  readonly property bool shown: !hideWhenIdle || !idle || barPeek
+  readonly property int shownSlot: shown ? barSlot : 0
+
+  implicitWidth: bar && bar.vertical ? (bar ? bar.barSize : Style.bar.sizeHorizontal) : shownSlot
+  implicitHeight: bar && bar.vertical ? shownSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
 
   // --- talking to the script -----------------------------------------------
 
@@ -428,6 +436,8 @@ Panel {
 
   BarIconButton {
     id: button
+    visible: root.shown
+    opacity: root.hideWhenIdle && root.idle ? 0.45 : 1
     anchors.fill: parent
     bar: root.bar
     slotSize: root.barSlot

@@ -79,6 +79,12 @@ omarchy bar move jankeesvw.nag --section right
 
 Update an installed copy with `omarchy plugin update jankeesvw.nag`.
 
+To keep the bar clear while no alarm is set, the way Omarchy's own indicators stay hidden until the pointer comes onto the bar:
+
+```sh
+omarchy bar set jankeesvw.nag hideWhenIdle true --json
+```
+
 Nothing to configure, no account, no API key. It needs `jq`, `dd`, `date` and `systemd-run`, which Omarchy already has, and it plays the alarm through `pw-play` with a sound from the `sound-theme-freedesktop` package.
 
 ## How it works, and why that matters
