@@ -702,12 +702,18 @@ cmd_fire() {
   local headline
   headline=$(strip_markup "$message")
   headline=${headline:-Alarm}
-  # --exec consumes the rest of the line and its words are run as argv without
-  # being re-parsed, so it comes last and the message never reaches it. Nothing
-  # from the message is in it: it is three constant words.
-  omarchy-notification-send -u critical -g "$GLYPH" \
-    "$headline" "$(date -d "@$at" '+%H:%M')" \
-    --exec omarchy-shell shell summon jankeesvw.nag >/dev/null 2>&1 || true
+  # The buttons answer the alarm without opening the panel; clicking the card
+  # snoozes. Their words are constants and the id goes after --with, so the
+  # message never reaches a command. Shells older than Omarchy 4.5 have no
+  # --action and get the click-to-open card instead.
+  local when
+  when=$(date -d "@$at" '+%H:%M')
+  omarchy-notification-send -u critical -g "$GLYPH" "$headline" "$when" \
+    --action "Snooze 5 min" "$SELF" snooze \
+    --action "Dismiss" "$SELF" dismiss \
+    --with "$id" >/dev/null 2>&1 ||
+    omarchy-notification-send -u critical -g "$GLYPH" "$headline" "$when" \
+      --exec omarchy-shell shell summon jankeesvw.nag >/dev/null 2>&1 || true
 
   refresh_panel
 }
