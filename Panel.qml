@@ -632,8 +632,11 @@ Panel {
           // "wed 18:15 hockey" put the Wednesday in the time and not in the
           // message.
           // Nothing recognised means nothing to say. The line still occupies
-          // its row, though: a line that appears and disappears would move the
-          // whole list up and down on the keystroke that makes a time valid.
+          // its row under a list, though: a line that appears and disappears
+          // would move the whole list up and down on the keystroke that makes a
+          // time valid. With no list there is nothing to move, and a blank row
+          // would only pad the bottom of the panel.
+          visible: root.alarms.length > 0 || text !== " "
           text: {
             if (root.actionError !== "") return root.actionError
             if (!root.preview || root.preview.ok !== true) return " "
