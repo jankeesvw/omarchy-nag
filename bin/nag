@@ -281,6 +281,8 @@ parse_duration() {
     # Guard the multiplication rather than the input: a 12-digit number of
     # weeks would otherwise overflow into a negative timestamp.
     ((${#num} > 7)) && return 1
+    # Base 10: bash reads a leading zero as octal, so "08m" was an error.
+    num=$((10#$num))
 
     case $unit in
       s | sec | secs | second | seconds) total=$((total + num)) ;;
@@ -575,6 +577,7 @@ cmd_snooze() {
 
   valid_id "$id" || die "unknown alarm"
   [[ $minutes =~ ^[0-9]{1,4}$ ]] || die "bad snooze"
+  minutes=$((10#$minutes))
   ((minutes >= 1 && minutes <= MAX_SNOOZE_MINUTES)) || die "bad snooze"
 
   local message="" raw=""
