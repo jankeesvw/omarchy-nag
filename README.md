@@ -79,6 +79,12 @@ omarchy bar move jankeesvw.nag --section right
 
 Update an installed copy with `omarchy plugin update jankeesvw.nag`.
 
+To wear another glyph than the timer, in the bar and on the notifications, for instance Omarchy's reminder bell where Nag replaces the reminder:
+
+```sh
+omarchy bar set jankeesvw.nag icon 󰢌
+```
+
 Nothing to configure, no account, no API key. It needs `jq`, `dd`, `date` and `systemd-run`, which Omarchy already has, and it plays the alarm through `pw-play` with a sound from the `sound-theme-freedesktop` package.
 
 ## How it works, and why that matters

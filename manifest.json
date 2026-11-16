@@ -16,6 +16,15 @@
     "description": "Disposable alarms from one text field: \"15:15 pick up the kids\", and the bar counts down to it.",
     "category": "Time",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "icon",
+        "type": "string",
+        "label": "Icon",
+        "description": "A glyph for the bar and the notifications, such as Omarchy's reminder bell 󰢌. Empty keeps the timer.",
+        "defaultValue": ""
+      }
+    ]
   }
 }

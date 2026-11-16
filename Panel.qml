@@ -46,6 +46,12 @@ Panel {
   // surrogate pair rather than as a five-digit escape, which \u would silently
   // truncate into a different glyph with a stray character after it.
   readonly property string iconTimer: "\uDB81\uDD1F"
+  // The `icon` setting swaps it for any other glyph, Omarchy's reminder bell
+  // for one, on a desktop where Nag stands in for the reminder.
+  readonly property string barIcon: {
+    var icon = plain(setting("icon", "")).trim().slice(0, 4)
+    return icon.length > 0 ? icon : iconTimer
+  }
   readonly property string iconClose: "\uF00D"
   readonly property string iconSnooze: "\uF186"
 
@@ -454,7 +460,7 @@ Panel {
         Text {
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
-          text: root.iconTimer
+          text: root.barIcon
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
           renderType: Text.NativeRendering

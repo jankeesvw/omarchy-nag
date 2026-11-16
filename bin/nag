@@ -36,7 +36,7 @@ readonly MAX_SNOOZE_MINUTES=1440
 readonly SOUND="/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
 # nf-md-timer, the same glyph the bar widget wears, so a Nag notification is
 # recognisable as one at a glance instead of looking like every other toast.
-readonly GLYPH=$'󰔟'
+readonly DEFAULT_GLYPH=$'󰔟'
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -48,6 +48,17 @@ die() {
 }
 
 ok_json() { jq -cn "$@"; }
+
+# The widget's `icon` setting when there is one, so the notification wears the
+# glyph the bar does. Read only when a notification goes out: `list` and
+# `parse` run every few seconds and have no use for it.
+glyph() {
+  local icon
+  icon=$(omarchy-bar get jankeesvw.nag icon 2>/dev/null) || icon=""
+  icon=$(strip_markup "$icon")
+  icon=${icon:0:4}
+  printf '%s' "${icon:-$DEFAULT_GLYPH}"
+}
 
 # One alarm document is a handful of fields, so anything approaching this is
 # either corruption or somebody else's file.
@@ -644,12 +655,12 @@ cmd_ask() {
     headline=${headline:-Alarm}
     headline=${headline^}
 
-    omarchy-notification-send -g "$GLYPH" "$headline $atPhrase" "in $remaining" \
+    omarchy-notification-send -g "$(glyph)" "$headline $atPhrase" "in $remaining" \
       >/dev/null 2>&1 || true
   else
     # Quote it back: seeing what you actually typed is what tells you which
     # word it choked on.
-    omarchy-notification-send -g "$GLYPH" "No time in that" \
+    omarchy-notification-send -g "$(glyph)" "No time in that" \
       "$(strip_markup "$text")" >/dev/null 2>&1 || true
   fi
 
@@ -705,7 +716,7 @@ cmd_fire() {
   # --exec consumes the rest of the line and its words are run as argv without
   # being re-parsed, so it comes last and the message never reaches it. Nothing
   # from the message is in it: it is three constant words.
-  omarchy-notification-send -u critical -g "$GLYPH" \
+  omarchy-notification-send -u critical -g "$(glyph)" \
     "$headline" "$(date -d "@$at" '+%H:%M')" \
     --exec omarchy-shell shell summon jankeesvw.nag >/dev/null 2>&1 || true
 
