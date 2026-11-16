@@ -23,7 +23,7 @@ The field takes the time and the message together, and works out where one ends 
 | `wed 18:15 hockey` | the next Wednesday |
 | `next monday 8:00 standup` | as it says |
 | `2d water the plants` | two days from now |
-| `25 dec 9:00 call mum` | a date further out |
+| `dec 25 9:00 call mum` | a date further out |
 
 A bare number is minutes, so `5` is five minutes, which is what `omarchy reminder` takes too. Durations also accept the spelled-out units (`min`, `hour`, `days`) and `u` for uur.
 
