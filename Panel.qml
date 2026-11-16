@@ -68,6 +68,10 @@ Panel {
   property string draft: ""
   property var preview: null
   property string actionError: ""
+  // Set when Enter finds no time in the draft, cleared by the next keystroke.
+  // Only on Enter: while "tomorrow" is being typed it is not a time yet either,
+  // and a hint that flickers on every half-word is noise.
+  property bool missingTime: false
 
   // One cursor over the list, with -1 meaning "nowhere, keep typing". The text
   // field keeps the focus the whole time, because typing is what this panel is
@@ -239,6 +243,7 @@ Panel {
   function setAlarm() {
     var text = draft.trim()
     if (text.length === 0) return
+    if (preview && preview.ok === false) missingTime = true
     if (!preview || preview.ok !== true) return
     runAction(["set", text])
     draft = ""
@@ -418,6 +423,7 @@ Panel {
     draft = ""
     preview = null
     actionError = ""
+    missingTime = false
     cursor = -1
 
     // A new example every time the panel opens, rather than on a timer. Over a
@@ -552,6 +558,7 @@ Panel {
           onTextChanged: {
             if (text !== root.draft) {
               root.draft = text
+              root.missingTime = false
               // Typing is a statement about the field, not about the list, so
               // it takes the cursor back out of the rows.
               root.cursor = -1
@@ -621,7 +628,7 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           color: {
-            if (root.actionError !== "") return root.urgent
+            if (root.actionError !== "" || root.missingTime) return root.urgent
             if (root.draft.trim().length === 0) return Qt.darker(root.foreground, 1.6)
             if (!root.preview) return Qt.darker(root.foreground, 1.6)
             return root.preview.ok === true ? root.accent : Qt.darker(root.foreground, 1.6)
@@ -636,6 +643,7 @@ Panel {
           // whole list up and down on the keystroke that makes a time valid.
           text: {
             if (root.actionError !== "") return root.actionError
+            if (root.missingTime) return "No time in that, add one: 5m, 15:15"
             if (!root.preview || root.preview.ok !== true) return " "
 
             return root.sentenceFor(root.preview)
